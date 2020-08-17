@@ -11,6 +11,8 @@ export function Camera() {
     }
 
     return (
-        <video ref={video} width="640" height="480" autoplay/>
+      <React.Fragment>
+        <video ref={video} width="640" height="480" autoPlay/>
+      </React.Fragment>
     );
 }

@@ -1,7 +1,10 @@
-import React from 'react';
-import ReactDOM from 'react-dom';
-import { Camera } from './camera/Camera.js'
+import React from "react";
+import ReactDOM from "react-dom";
 
-const element = <Camera />
+import App from "./App";
 
-ReactDOM.render(element, document.getElementById("root"))
+const rootElement = document.getElementById("root");
+ReactDOM.render(
+    <App />,
+  rootElement
+);

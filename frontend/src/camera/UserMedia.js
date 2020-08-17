@@ -1,9 +1,17 @@
 import { useState, useEffect } from 'react';
 
 export function UserMedia() {
-    const [stream, setStream] = useState(null);
+  const [stream, setStream] = useState(null);
 
-    useEffect ( () => setStream(navigator.mediaDevices.getUserMedia({ video: true })) );
+  useEffect (() => {
+    async function startStream() {
+      const video = await navigator.mediaDevices.getUserMedia({ video: true });
+      setStream(video); 
+    }
 
-    return stream;
+    startStream();
+
+  }, []);
+
+  return stream;
 }
