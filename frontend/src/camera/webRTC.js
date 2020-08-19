@@ -8,19 +8,59 @@ export function startConnection(stream) {
         ]
     })
 
+    var socket = new WebSocket("ws://" + window.location.hostname + ":8050/ws");
+
     pc.addStream(stream)
     pc.createOffer().then(d => pc.setLocalDescription(d))
 
     pc.onicecandidate = event => {
-        if (event.candidate != null) {
-            send(pc.localDescription)
+        if ( isOpen(socket) && event.candidate != null) {
+            send(socket, event.candidate)
         }
     };
+
+    receive(socket, pc)
 }
 
-function send(data) {
-    var xhttp = new XMLHttpRequest();
-    xhttp.open("POST", "/ws", true); 
-    xhttp.setRequestHeader("Content-Type", "application/json");
-    xhttp.send(data);
+function isOpen(socket) {
+    return (socket.readyState == WebSocket.OPEN)
 }
+
+function send(socket, data) {
+    try {
+        socket.send(JSON.stringify(data))
+        console.log("sending: ", data)
+    } catch(e) {
+        console.log(e)
+    }
+}
+
+function receive(socket, pc) {
+    return socket.onmessage = function (evt) {
+
+        try {
+            var message = JSON.parse(evt.data);
+            console.log("receiving: ", message)
+            if (message.sdp) {
+                pc.setRemoteDescription(new RTCSessionDescription(message), function () {
+                    if (pc.remoteDescription.type == "offer") {
+                        pc.createAnswer().then(function(answer) {
+                            send(socket, answer);
+                            return pc.setLocalDescription(answer);
+                        })
+                        .catch(e => console.log(e));
+                    }
+                }, e => console.log("e"))
+            } else {
+                pc.addIceCandidate(message)
+                    .then(console.log("candidate added"))
+                    .catch( e => console.log(e))
+            }
+        } catch(e) {
+            console.log("error: ", e)
+            console.log("message: ", )
+        }
+    
+    }
+}
+
