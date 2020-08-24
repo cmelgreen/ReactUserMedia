@@ -5,18 +5,19 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
-	"github.com/julienschmidt/httprouter"
 	"github.com/gorilla/websocket"
+
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc"
-	//"github.com/pion/webrtc/pkg/media"
-	//"github.com/pion/webrtc/pkg/media/ivfwriter"
-	//"github.com/pion/webrtc/pkg/media/oggwriter"
+	"github.com/pion/webrtc/pkg/media"
+	"github.com/pion/webrtc/pkg/media/ivfwriter"
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  512,
+	WriteBufferSize: 512,
 }
 
 type connHandler struct {
@@ -27,11 +28,14 @@ type connHandler struct {
 func newConnHandler(w http.ResponseWriter, r *http.Request) (connHandler, error) {
 	conn := connHandler{}
 
+	// Upgrade http to websocket
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return conn, err
 	}
 
+	// Create new webrtc peer connection obj
+	// Note: connection to client won't be formed until negotiate() is called
 	pc, err := newPeerConnection()
 	if err != nil {
 		return conn, err
@@ -43,7 +47,7 @@ func newConnHandler(w http.ResponseWriter, r *http.Request) (connHandler, error)
 	return conn, nil
 }
 
-func webRTCHandle(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func webRTCHandle(w http.ResponseWriter, r *http.Request) {
 	conn, err := newConnHandler(w, r)
 	if err != nil {
 		fmt.Fprint(w, "unable to connect")
@@ -55,7 +59,7 @@ func webRTCHandle(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 
 func newAPIWithMedia() *webrtc.API {
 	m := webrtc.MediaEngine{}
-	m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
+	// m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
 	m.RegisterCodec(webrtc.NewRTPVP8Codec(webrtc.DefaultPayloadTypeVP8, 90000))
 
 	return webrtc.NewAPI(webrtc.WithMediaEngine(m))
@@ -81,30 +85,38 @@ func newPeerConnection() (*webrtc.PeerConnection, error) {
 }
 
 func (conn *connHandler) negotiate() {
-	if _, err := conn.peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio); err != nil {
-		panic(err)
-	} else if _, err = conn.peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
+ 	if _, err := conn.peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
 		panic(err)
 	}
 
 	var candidatesMux sync.Mutex
 	pendingCandidates := make([]*webrtc.ICECandidate, 0)
 
-	offer, err := conn.peerConnection.CreateOffer(nil)
+	ivfFile, err := ivfwriter.New("output.ivf")
 	if err != nil {
 		panic(err)
 	}
 
-	if err = conn.peerConnection.SetLocalDescription(offer); err != nil {
-		panic(err)
-	}
+	conn.peerConnection.OnTrack(func(track *webrtc.Track, receiver *webrtc.RTPReceiver) {
+		// Send a PLI on an interval so that the publisher is pushing a keyframe every rtcpPLIInterval
+		fmt.Println("*****ONTRACK*****")
+		go func() {
+			ticker := time.NewTicker(time.Second * 3)
+			for range ticker.C {
+				errSend := conn.peerConnection.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: track.SSRC()}})
+				if errSend != nil {
+					fmt.Println(errSend)
+				}
+			}
+		}()
 
-	payload, err := json.Marshal(offer)
-	if err != nil {
-		panic(err)
-	}
+		codec := track.Codec()
 
-	conn.socket.WriteMessage(websocket.TextMessage, payload)
+		if codec.Name == webrtc.VP8 {
+			fmt.Println("Got VP8 track, saving to disk as output.ivf")
+			saveToDisk(ivfFile, track)
+		}
+	})
 
 	conn.peerConnection.OnICECandidate(func(c *webrtc.ICECandidate) {
 		fmt.Println("candidate sent: ", c)
@@ -128,6 +140,27 @@ func (conn *connHandler) negotiate() {
 			conn.sendMessage(websocket.TextMessage, payload)
 		}
 	})
+
+	conn.sendOffer()
+}
+
+func (conn *connHandler) sendOffer() {
+	offer, err := conn.peerConnection.CreateOffer(nil)
+	if err != nil {
+		panic(err)
+	}
+
+	if err = conn.peerConnection.SetLocalDescription(offer); err != nil {
+		panic(err)
+	}
+
+	fmt.Println(offer)
+	payload, err := json.Marshal(offer)
+	if err != nil {
+		panic(err)
+	}
+
+	conn.socket.WriteMessage(websocket.TextMessage, payload)
 }
 
 func (conn *connHandler) sendMessage(messageType int, payload []byte) {
@@ -143,12 +176,20 @@ func (conn *connHandler) listen() {
 		_, p, err := conn.socket.ReadMessage()
 		if err != nil {
 			fmt.Println("wsReader read", err)
+			fmt.Println("Closing connections")
+			return
 		}
 
-		var b webrtc.SessionDescription
-		err = json.Unmarshal(p, &b)
+		var answer webrtc.SessionDescription
+		err = json.Unmarshal(p, &answer)
 		if err != nil {
 			fmt.Println("wsReader unmarshal SessionDescription: ", err)
+		}
+
+		fmt.Println("answer received", answer.Type)
+		if answer.Type == webrtc.SDPTypeOffer {
+			conn.peerConnection.SetRemoteDescription(answer)
+			
 		}
 
 		var c webrtc.ICECandidateInit
@@ -158,7 +199,25 @@ func (conn *connHandler) listen() {
 		}
 		fmt.Println("candidate received: ", c)
 
-		conn.peerConnection.SetRemoteDescription(b)
+		//conn.peerConnection.SetRemoteDescription(answer)
 		conn.peerConnection.AddICECandidate(c)
+	}
+}
+
+func saveToDisk(i media.Writer, track *webrtc.Track) {
+	defer func() {
+		if err := i.Close(); err != nil {
+			panic(err)
+		}
+	}()
+
+	for {
+		rtpPacket, err := track.ReadRTP()
+		if err != nil {
+			panic(err)
+		}
+		if err := i.WriteRTP(rtpPacket); err != nil {
+			panic(err)
+		}
 	}
 }

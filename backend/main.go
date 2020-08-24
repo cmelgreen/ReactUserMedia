@@ -18,7 +18,7 @@ func main() {
 	router := httprouter.New()
 
 	router.GET("/", index)
-	router.GET("/ws", webRTCHandle)
+	router.HandlerFunc(http.MethodGet, "/ws", webRTCHandle)
 	router.ServeFiles("/static/*filepath", http.Dir("../frontend/build/static"))
 
 	log.Fatal(http.ListenAndServe(":8050", router))
