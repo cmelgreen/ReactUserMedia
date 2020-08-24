@@ -76,8 +76,13 @@ func newPeerConnection() (*webrtc.PeerConnection, error) {
 		},
 	}
 
+
 	peerConnection, err := api.NewPeerConnection(config)
 	if err != nil {
+		return nil, err
+	}
+
+	if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
 		return nil, err
 	}
 
@@ -85,10 +90,6 @@ func newPeerConnection() (*webrtc.PeerConnection, error) {
 }
 
 func (conn *connHandler) negotiate() {
- 	if _, err := conn.peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
-		panic(err)
-	}
-
 	var candidatesMux sync.Mutex
 	pendingCandidates := make([]*webrtc.ICECandidate, 0)
 
@@ -127,17 +128,13 @@ func (conn *connHandler) negotiate() {
 		candidatesMux.Lock()
 		defer candidatesMux.Unlock()
 
-		payload, err := json.Marshal(c.ToJSON())
-		if err != nil {
-			fmt.Println("unable to marshal json")
-		}
-		conn.sendMessage(websocket.TextMessage, payload)
+		conn.sendMessage(c.ToJSON())
 
 		desc := conn.peerConnection.RemoteDescription()
 		if desc == nil {
 			pendingCandidates = append(pendingCandidates, c)
 		} else {
-			conn.sendMessage(websocket.TextMessage, payload)
+			conn.sendMessage(c.ToJSON())
 		}
 	})
 
@@ -145,6 +142,7 @@ func (conn *connHandler) negotiate() {
 }
 
 func (conn *connHandler) sendOffer() {
+	fmt.Println("sendOffer")
 	offer, err := conn.peerConnection.CreateOffer(nil)
 	if err != nil {
 		panic(err)
@@ -154,17 +152,27 @@ func (conn *connHandler) sendOffer() {
 		panic(err)
 	}
 
-	fmt.Println(offer)
-	payload, err := json.Marshal(offer)
+	conn.sendMessage(offer)
+}
+
+func (conn *connHandler) sendAnswer() {
+	fmt.Println("sendAnswer")
+	answer, err := conn.peerConnection.CreateAnswer(nil)
 	if err != nil {
 		panic(err)
 	}
 
-	conn.socket.WriteMessage(websocket.TextMessage, payload)
+	conn.sendMessage(answer)
 }
 
-func (conn *connHandler) sendMessage(messageType int, payload []byte) {
-	err := conn.socket.WriteMessage(messageType, payload)
+func (conn *connHandler) sendMessage(message interface{}) {
+	fmt.Println("Sending message")
+	payload, err := json.Marshal(message)
+	if err != nil {
+		panic(err)
+	}
+
+	err = conn.socket.WriteMessage(websocket.TextMessage, payload)
 	if err != nil {
 		fmt.Println("message not sent")
 	}
@@ -180,16 +188,31 @@ func (conn *connHandler) listen() {
 			return
 		}
 
-		var answer webrtc.SessionDescription
-		err = json.Unmarshal(p, &answer)
+		fmt.Println("trying to unmarshal renegotiate")
+		var renegotiate string
+		err = json.Unmarshal(p, &renegotiate)
+		if err != nil {
+			fmt.Println("renegotiate failed to parse")
+		}
+		if renegotiate == "renegotiate" {
+			fmt.Println("renegotiating")
+			conn.sendOffer()
+		}
+
+		var sessDesc webrtc.SessionDescription
+		err = json.Unmarshal(p, &sessDesc)
 		if err != nil {
 			fmt.Println("wsReader unmarshal SessionDescription: ", err)
 		}
 
-		fmt.Println("answer received", answer.Type)
-		if answer.Type == webrtc.SDPTypeOffer {
-			conn.peerConnection.SetRemoteDescription(answer)
-			
+		switch sessDesc.Type {
+		case webrtc.SDPTypeAnswer:
+			fmt.Println("answer received")
+			conn.peerConnection.SetRemoteDescription(sessDesc)
+		case webrtc.SDPTypeOffer:
+			fmt.Println("offer received")
+			conn.peerConnection.SetRemoteDescription(sessDesc)
+			conn.sendAnswer()
 		}
 
 		var c webrtc.ICECandidateInit

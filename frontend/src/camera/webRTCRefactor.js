@@ -18,31 +18,42 @@ class connHandler {
         this.peerConnection = new RTCPeerConnection(defaultIceServers)
         this.listener = null
         this.peerConnection.oniceconnectionstatechange = () => console.log("state change", this.peerConnection.iceConnectionState)
-        this.peerConnection.onnegotiationneeded = e => this.peerConnection.createOffer()
-            .then(offer => this.peerConnection.setLocalDescription(offer))
-            .then(() => {
-                console.log("onnegotationneeded")
-                //this.send(this.peerConnection.localDescription)
-            })
+        this.socket.addEventListener('open', () => {
+            console.log("socket open")
+            this.peerConnection.onnegotiationneeded = e => {
+                console.log("negotiation needed")
+                this.send("renegotiate")
+            }
+        })
     }
-
+    
     negotiate() {
-        this.peerConnection.createOffer()
-            .then(d => this.peerConnection.setLocalDescription(d))
+        //this.sendOffer()
         this.startUserMedia(this)
         this.sendIceCandidates()
         this.startListener()
+        //this.sendOffer()
 
             //.then(this.addMediaTrack())
     }
 
+    sendOffer() {
+        console.log("sendOffer")
+        this.peerConnection.createOffer()
+            .then(d => {
+                this.peerConnection.setLocalDescription(d)
+                this.send(d)
+            })
+
+    }
+
     startUserMedia(conn) {
         const f = async function startStream() {
-            console.log("startUserMedia F")
+            console.log("startUserMedia")
             var video = await navigator.mediaDevices.getUserMedia({ video: true })
             for (const track of video.getVideoTracks()) {
                 conn.peerConnection.addTrack(track, video)
-                console.log(conn, track)
+                console.log(track)
             }
         }
         f()
@@ -59,17 +70,20 @@ class connHandler {
         this.socket.onmessage = event => {
             var message = JSON.parse(event.data)
             if (message.sdp) {
-                conn.receiveOffer(message)
+                this.receiveDesc(message)
             } else if (message.candidate) {
                 conn.receiveICECandidate(message)
             }
         }
     }
 
-    receiveOffer(message) {
-        console.log("receiveOffer")
+    receiveDesc(message) {
+        console.log("receiveDesc", message.type)
+        console.log(message.sdp)
         this.peerConnection.setRemoteDescription(new RTCSessionDescription(message))
-        this.sendAnswer()
+        if (message.type == "offer") {
+            this.sendAnswer()
+        }
     }
 
     sendAnswer() {
@@ -77,7 +91,6 @@ class connHandler {
         let conn = this
         conn.peerConnection.createAnswer()
             .then(answer => {
-                console.log(answer)
                 conn.send(answer)
                 return conn.peerConnection.setLocalDescription(answer)
             })
