@@ -21,7 +21,7 @@ func main() {
 	router.HandlerFunc(http.MethodGet, "/ws", webRTCHandle)
 	router.ServeFiles("/static/*filepath", http.Dir("../frontend/build/static"))
 
-	log.Fatal(http.ListenAndServe(":8050", router))
+	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
 func index(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
