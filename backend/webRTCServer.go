@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"time"
@@ -71,7 +72,7 @@ func newPeerConnection() (*webrtc.PeerConnection, error) {
 	m := webrtc.MediaEngine{}
 	m.RegisterCodec(webrtc.NewRTPVP8Codec(webrtc.DefaultPayloadTypeVP8, 90000))
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(m))
-	
+
 	peerConnection, err := api.NewPeerConnection(defaultIceServers)
 	if err != nil {
 		return nil, err
@@ -85,33 +86,31 @@ func newPeerConnection() (*webrtc.PeerConnection, error) {
 }
 
 func (conn *connHandler) send(message interface{}) {
-	fmt.Println("Sending message")
 	payload, err := json.Marshal(message)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 
 	err = conn.socket.WriteMessage(websocket.TextMessage, payload)
 	if err != nil {
-		fmt.Println("message not sent")
+		log.Println("message not sent")
 	}
 }
 
 func (conn *connHandler) startUserMedia() {
 	ivfFile, err := ivfwriter.New("output.ivf")
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 
 	conn.peerConnection.OnTrack(func(track *webrtc.Track, receiver *webrtc.RTPReceiver) {
-		// Send a PLI on an interval so that the publisher is pushing a keyframe every rtcpPLIInterval
-		fmt.Println("*****ONTRACK*****")
+		// Send heartbeat - copied from Pion example code
 		go func() {
 			ticker := time.NewTicker(time.Second * 3)
 			for range ticker.C {
 				errSend := conn.peerConnection.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: track.SSRC()}})
 				if errSend != nil {
-					fmt.Println(errSend)
+					log.Println(errSend)
 				}
 			}
 		}()
@@ -119,7 +118,6 @@ func (conn *connHandler) startUserMedia() {
 		codec := track.Codec()
 
 		if codec.Name == webrtc.VP8 {
-			fmt.Println("Got VP8 track, saving to disk as output.ivf")
 			saveToDisk(ivfFile, track)
 		}
 	})
@@ -135,82 +133,61 @@ func (conn *connHandler) sendIceCandidates() {
 }
 
 func (conn *connHandler) sendOffer() {
-	fmt.Println("sendOffer")
 	offer, err := conn.peerConnection.CreateOffer(nil)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 
 	if err = conn.peerConnection.SetLocalDescription(offer); err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 
 	conn.send(offer)
 }
 
 func (conn *connHandler) startListener() {
-	fmt.Println("listening")
+	var renegotiate string
+	var candidate webrtc.ICECandidateInit
+	var sessDesc webrtc.SessionDescription
+
 	for {
 		_, p, err := conn.socket.ReadMessage()
 		if err != nil {
-			fmt.Println("wsReader read", err)
-			fmt.Println("Closing connections")
 			conn.peerConnection.Close()
 			return
 		}
 
-		fmt.Println("trying to unmarshal renegotiate")
-		var renegotiate string
-		err = json.Unmarshal(p, &renegotiate)
-		if err != nil {
-			fmt.Println("renegotiate failed to parse")
-		}
-		if renegotiate == "renegotiate" {
-			fmt.Println("renegotiating")
+		if err = json.Unmarshal(p, &candidate); err != nil {
+			conn.peerConnection.AddICECandidate(candidate)
+			candidate = webrtc.ICECandidateInit{}
+			
+		} else if err = json.Unmarshal(p, &sessDesc); sessDesc.Type == webrtc.SDPTypeAnswer {
+			conn.peerConnection.SetRemoteDescription(sessDesc)
+			sessDesc = webrtc.SessionDescription{}
+
+		} else if err = json.Unmarshal(p, &renegotiate); renegotiate == "renegotiate" {
 			conn.sendOffer()
-		}
+			renegotiate = ""
 
-		var sessDesc webrtc.SessionDescription
-		err = json.Unmarshal(p, &sessDesc)
-		if err != nil {
-			fmt.Println("wsReader unmarshal SessionDescription: ", err)
 		}
-
-		switch sessDesc.Type {
-		case webrtc.SDPTypeAnswer:
-			fmt.Println("answer received")
-			conn.peerConnection.SetRemoteDescription(sessDesc)
-		case webrtc.SDPTypeOffer:
-			fmt.Println("offer received")
-			conn.peerConnection.SetRemoteDescription(sessDesc)
-		}
-
-		var c webrtc.ICECandidateInit
-		err = json.Unmarshal(p, &c)
-		if err != nil {
-			fmt.Println("wsReader unmarshal ICECandidateInit")
-		}
-		fmt.Println("candidate received: ", c)
-
-		conn.peerConnection.AddICECandidate(c)
 	}
 }
 
 func saveToDisk(i media.Writer, track *webrtc.Track) {
 	defer func() {
 		if err := i.Close(); err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 	}()
 
 	for {
 		rtpPacket, err := track.ReadRTP()
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 		fmt.Println(rtpPacket.Payload)
 		if err := i.WriteRTP(rtpPacket); err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 	}
 }
